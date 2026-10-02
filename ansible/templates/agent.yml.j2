@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ agent_name }}
+  namespace: {{ demo_namespace }}
+  labels: {app: {{ agent_name }}}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: {{ agent_name }}}
+  template:
+    metadata:
+      labels: {app: {{ agent_name }}}
+      annotations:
+        checksum/code: "{{ lookup('file', app_dir ~ '/agent.py') | hash('sha256') }}"
+        checksum/config: "{{ (agent_config | to_json) | hash('sha256') }}"
+        checksum/credentials: "{{ agent_app.client_secret | hash('sha256') }}"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: agent
+          image: {{ python_image }}
+          command: ["python", "/app/agent.py"]
+          env:
+            - {name: PYTHONUNBUFFERED, value: "1"}
+{% if am_ca %}
+            - {name: CA_FILE, value: /app/ca.crt}
+{% endif %}
+{% if not agentminder_validate_certs %}
+            - {name: VERIFY_TLS, value: "false"}
+{% endif %}
+{% for k, v in agent_config.items() %}
+            - {name: {{ k }}, value: {{ v | string | to_json }}}
+{% endfor %}
+            - name: CLIENT_ID
+              valueFrom: {secretKeyRef: {name: {{ agent_name }}-credentials, key: client_id}}
+            - name: CLIENT_SECRET
+              valueFrom: {secretKeyRef: {name: {{ agent_name }}-credentials, key: client_secret}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: code, mountPath: /app}
+      volumes:
+        - name: code
+          configMap: {name: {{ agent_name }}}

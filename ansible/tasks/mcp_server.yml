@@ -1,0 +1,118 @@
+---
+# Deploy the demo MCP server and work out the URL the AgentMinder gateway
+# uses to reach it. See mcp_expose in group_vars.
+
+- name: Demo namespace
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ demo_namespace }}"
+
+- name: MCP server code
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: mcp-server
+        namespace: "{{ demo_namespace }}"
+      data:
+        mcp_server.py: "{{ lookup('file', app_dir ~ '/mcp_server.py') }}"
+
+# Reuse the hostname of an existing Gateway so the first apply below does not
+# strip it from the listener and route.
+- name: Existing MCP Gateway
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    namespace: "{{ demo_namespace }}"
+    name: mcp-server
+  register: _gw_existing
+  when: mcp_expose == 'gateway'
+
+- name: Hostname from the existing Gateway
+  ansible.builtin.set_fact:
+    mcp_hostname: "{{ _gw_existing.resources[0].spec.listeners[0].hostname }}"
+  when:
+    - mcp_expose == 'gateway'
+    - mcp_hostname | length == 0
+    - _gw_existing.resources | length > 0
+    - _gw_existing.resources[0].spec.listeners[0].hostname is defined
+
+- name: MCP server deployment and service
+  kubernetes.core.k8s:
+    definition: "{{ lookup('template', playbook_dir ~ '/templates/mcp-server.yml.j2') | from_yaml_all | list }}"
+    wait: true
+    wait_timeout: 300
+
+- name: Gateway exposure
+  when: mcp_expose == 'gateway'
+  block:
+    - name: Wait for the Gateway address
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1
+        kind: Gateway
+        namespace: "{{ demo_namespace }}"
+        name: mcp-server
+      register: _gw
+      until: (_gw.resources[0].status.addresses | default([]) | length) > 0
+      retries: 30
+      delay: 10
+
+    # Some Gateway controllers (AKO for one) ignore HTTPRoutes without a
+    # hostname, and the AgentMinder gateway has to resolve that hostname.
+    # Unless mcp_hostname is set, derive an sslip.io name from the Gateway
+    # address and apply it to the listener and the route.
+    - name: Hostname for the MCP Gateway
+      ansible.builtin.set_fact:
+        mcp_hostname: "{{ mcp_hostname | default('amdemo-mcp-' ~ (_gw.resources[0].status.addresses[0].value | replace('.', '-')) ~ '.sslip.io', true) }}"
+
+    - name: Apply the hostname to the Gateway and route
+      kubernetes.core.k8s:
+        definition: "{{ lookup('template', playbook_dir ~ '/templates/mcp-server.yml.j2') | from_yaml_all | list }}"
+
+    - name: Wait for the route to be accepted
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1
+        kind: HTTPRoute
+        namespace: "{{ demo_namespace }}"
+        name: mcp-server
+      register: _route
+      until: >-
+        _route.resources[0].status.parents | default([])
+        | map(attribute='conditions') | flatten
+        | selectattr('type', 'eq', 'Accepted') | selectattr('status', 'eq', 'True') | list | length > 0
+      retries: 18
+      delay: 10
+
+    - name: Gateway MCP backend URL
+      ansible.builtin.set_fact:
+        mcp_endpoint: "http://{{ mcp_hostname }}/mcp"
+
+- name: LoadBalancer exposure
+  when: mcp_expose == 'loadbalancer'
+  block:
+    - name: Wait for the LoadBalancer address
+      kubernetes.core.k8s_info:
+        kind: Service
+        namespace: "{{ demo_namespace }}"
+        name: mcp-server
+      register: _svc
+      until: (_svc.resources[0].status.loadBalancer.ingress | default([]) | length) > 0
+      retries: 30
+      delay: 10
+
+    - name: LoadBalancer MCP backend URL
+      ansible.builtin.set_fact:
+        mcp_endpoint: "http://{{ _svc.resources[0].status.loadBalancer.ingress[0].ip | default(_svc.resources[0].status.loadBalancer.ingress[0].hostname) }}/mcp"
+
+- name: In-cluster MCP backend URL
+  ansible.builtin.set_fact:
+    mcp_endpoint: "http://mcp-server.{{ demo_namespace }}.svc.cluster.local/mcp"
+  when: mcp_expose == 'clusterip'
+
+- name: Show the MCP backend URL
+  ansible.builtin.debug:
+    var: mcp_endpoint

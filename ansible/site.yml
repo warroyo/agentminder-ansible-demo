@@ -1,0 +1,36 @@
+---
+# Full demo: MCP server + agent on the demo cluster, registered and governed by AgentMinder.
+#   ansible-playbook site.yml
+#   ansible-playbook site.yml -e '{"granted_intents": ["amdemo.read", "amdemo.write"]}'
+- name: AgentMinder agent + MCP demo
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig | expanduser }}"
+      context: "{{ kube_context | default(omit, true) }}"
+    agentminder_intent: &am
+      base_url: "{{ agentminder_url }}"
+      tenant: "{{ agentminder_tenant }}"
+      client_id: "{{ agentminder_client_id }}"
+      client_secret: "{{ agentminder_client_secret }}"
+      ca_cert: "{{ am_ca }}"
+      validate_certs: "{{ agentminder_validate_certs }}"
+    agentminder_app: *am
+    agentminder_policy: *am
+  tasks:
+    - name: Check settings
+      ansible.builtin.import_tasks: tasks/preflight.yml
+      tags: [always]
+
+    - name: MCP server
+      ansible.builtin.import_tasks: tasks/mcp_server.yml
+      tags: [mcp, agentminder, agent]
+
+    - name: AgentMinder registration
+      ansible.builtin.import_tasks: tasks/agentminder.yml
+      tags: [agentminder, agent]
+
+    - name: Agent
+      ansible.builtin.import_tasks: tasks/agent.yml
+      tags: [agent]

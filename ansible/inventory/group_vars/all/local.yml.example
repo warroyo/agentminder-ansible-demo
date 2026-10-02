@@ -1,0 +1,29 @@
+---
+# Copy to local.yml and edit. local.yml is git-ignored; it holds a secret.
+
+agentminder_url: https://agentminder.example.com
+agentminder_tenant: default
+
+# Admin API client for the tenant.
+agentminder_client_id: "..."
+agentminder_client_secret: "..."
+
+# CA that signed the AgentMinder certificate. Drop this line for a public CA.
+agentminder_ca_file: ~/agentminder-ca.crt
+
+# --- optional ------------------------------------------------------------------
+
+# Demo cluster. Defaults to $KUBECONFIG or ~/.kube/config, current context.
+# kubeconfig: ~/.kube/demo.yaml
+# kube_context: my-context
+
+# Expose the MCP server with Gateway API instead of a LoadBalancer Service.
+# mcp_expose: gateway
+# mcp_gateway_class: my-gateway-class   # kubectl get gatewayclass
+# mcp_hostname: mcp.example.com         # default: sslip.io name from the address
+
+# AgentMinder runs on the demo cluster: no load balancer needed.
+# mcp_expose: clusterip
+
+# Load balancer talks Istio mTLS to backends (AKO with istioEnabled).
+# mcp_istio_sidecar: true

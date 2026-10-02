@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server
+  namespace: {{ demo_namespace }}
+  labels: {app: mcp-server}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mcp-server}
+  template:
+    metadata:
+      labels:
+        app: mcp-server
+        # "true" for load balancers that talk Istio mTLS to backends (AKO with
+        # istioEnabled). Always set, so switching it off removes the sidecar.
+        sidecar.istio.io/inject: "{{ 'true' if mcp_istio_sidecar | bool else 'false' }}"
+      annotations:
+        checksum/code: "{{ lookup('file', app_dir ~ '/mcp_server.py') | hash('sha256') }}"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mcp-server
+          image: {{ python_image }}
+          command: ["sh", "-c"]
+          args:
+            - pip install -q --no-cache-dir --target /tmp/deps 'mcp>=1.12,<2' && exec python /app/mcp_server.py
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: PYTHONPATH, value: /tmp/deps}
+            - {name: PYTHONUNBUFFERED, value: "1"}
+            - {name: PORT, value: "8080"}
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: code, mountPath: /app}
+      volumes:
+        - name: code
+          configMap: {name: mcp-server}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server
+  namespace: {{ demo_namespace }}
+spec:
+  type: {{ 'LoadBalancer' if mcp_expose == 'loadbalancer' else 'ClusterIP' }}
+  selector: {app: mcp-server}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+{% if mcp_expose == 'gateway' %}
+---
+# The hostname is filled in on a second apply; see tasks/mcp_server.yml.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mcp-server
+  namespace: {{ demo_namespace }}
+spec:
+  gatewayClassName: {{ mcp_gateway_class }}
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+{% if mcp_hostname | default('') %}
+      hostname: {{ mcp_hostname }}
+{% endif %}
+      allowedRoutes:
+        namespaces: {from: Same}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp-server
+  namespace: {{ demo_namespace }}
+spec:
+  parentRefs:
+    - name: mcp-server
+{% if mcp_hostname | default('') %}
+  hostnames: [{{ mcp_hostname }}]
+{% endif %}
+  rules:
+    - matches:
+        - path: {type: PathPrefix, value: /mcp}
+      backendRefs:
+        - name: mcp-server
+          port: 80
+{% endif %}

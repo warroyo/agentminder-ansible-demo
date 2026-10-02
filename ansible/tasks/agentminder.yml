@@ -1,0 +1,49 @@
+---
+# Register the demo in AgentMinder, in dependency order:
+# intents -> MCP resource server (with tool bindings) -> agent -> policy.
+
+- name: Intents in the tenant catalog
+  agentminder_intent:
+    name: "{{ item.name }}"
+    description: "{{ item.description }}"
+    risk: "{{ item.risk }}"
+  loop: "{{ intents }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: MCP resource server with tool bindings
+  agentminder_app:
+    name: "{{ mcp_server_name }}"
+    type: mcp_server
+    description: AgentMinder demo MCP server ({{ demo_namespace }})
+    mcp_endpoint: "{{ mcp_endpoint }}"
+    intents: "{{ intents }}"
+    tool_bindings: "{{ tool_bindings }}"
+  register: mcp_app
+
+- name: Agent app
+  agentminder_app:
+    name: "{{ agent_name }}"
+    type: agent
+    description: AgentMinder demo agent ({{ demo_namespace }})
+    risk_level: standard
+    delegation_mode: AUTONOMOUS
+    return_secret: true
+  register: agent_app
+  no_log: true
+
+- name: Policy granting intents to the agent
+  agentminder_policy:
+    name: "{{ policy_name }}"
+    description: "{{ agent_name }} may call {{ granted_intents | join(', ') }} on {{ mcp_server_name }}"
+    resource_server: "{{ mcp_server_name }}"
+    agents: ["{{ agent_name }}"]
+    intents: "{{ granted_intents }}"
+  register: policy
+
+- name: Summary
+  ansible.builtin.debug:
+    msg:
+      - "MCP server app {{ mcp_app.app_id }} -> gateway {{ mcp_app.gateway_url }}"
+      - "Agent app {{ agent_app.app_id }} client {{ agent_app.client_id }}"
+      - "Policy {{ policy_name }} ({{ policy.policy_id }}) grants {{ granted_intents }}"

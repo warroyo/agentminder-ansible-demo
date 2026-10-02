@@ -1,0 +1,52 @@
+---
+# Remove everything site.yml created.
+- name: Tear down AgentMinder demo
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig | expanduser }}"
+      context: "{{ kube_context | default(omit, true) }}"
+    agentminder_intent: &am
+      base_url: "{{ agentminder_url }}"
+      tenant: "{{ agentminder_tenant }}"
+      client_id: "{{ agentminder_client_id }}"
+      client_secret: "{{ agentminder_client_secret }}"
+      ca_cert: "{{ am_ca }}"
+      validate_certs: "{{ agentminder_validate_certs }}"
+    agentminder_app: *am
+    agentminder_policy: *am
+  tasks:
+    - name: Check settings
+      ansible.builtin.import_tasks: tasks/preflight.yml
+      tags: [always]
+
+    - name: Delete demo namespace on the demo cluster
+      kubernetes.core.k8s:
+        kind: Namespace
+        name: "{{ demo_namespace }}"
+        state: absent
+        wait: true
+
+    - name: Delete policy
+      agentminder_policy:
+        name: "{{ policy_name }}"
+        state: absent
+
+    - name: Delete apps
+      agentminder_app:
+        name: "{{ item.name }}"
+        type: "{{ item.type }}"
+        mcp_endpoint: unused
+        state: absent
+      loop:
+        - {name: "{{ agent_name }}", type: agent}
+        - {name: "{{ mcp_server_name }}", type: mcp_server}
+
+    - name: Delete intents
+      agentminder_intent:
+        name: "{{ item.name }}"
+        state: absent
+      loop: "{{ intents }}"
+      loop_control:
+        label: "{{ item.name }}"

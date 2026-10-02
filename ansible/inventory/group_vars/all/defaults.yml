@@ -1,0 +1,87 @@
+---
+# Defaults for the demo. Put your own values in local.yml next to this file
+# (see local.yml.example); it is git-ignored and overrides anything here.
+# Files load in name order, so local.yml wins over defaults.yml.
+
+# --- AgentMinder (already installed and reachable) -----------------------------
+
+agentminder_url: ""
+agentminder_tenant: default
+
+# Admin API client for the tenant. Required.
+agentminder_client_id: ""
+agentminder_client_secret: ""
+
+# PEM file with the CA that signed the AgentMinder certificate. Leave empty
+# when a public CA signed it. The agent pod gets the same CA.
+agentminder_ca_file: ""
+agentminder_validate_certs: true
+
+# --- demo cluster --------------------------------------------------------------
+
+# Any Kubernetes cluster that can reach AgentMinder and that AgentMinder can
+# reach back. The agent and MCP server run here.
+kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default('~/.kube/config', true) }}"
+kube_context: ""
+
+demo_namespace: agentminder-demo
+python_image: python:3.12-slim
+
+# --- MCP server exposure -------------------------------------------------------
+
+# How the AgentMinder gateway reaches the MCP server:
+#   loadbalancer - Service of type LoadBalancer (works on any cluster with one)
+#   gateway      - Gateway API Gateway + HTTPRoute (needs mcp_gateway_class)
+#   clusterip    - ClusterIP only; use when AgentMinder runs on the same cluster
+# The agent needs no Service. It only makes outbound calls.
+mcp_expose: loadbalancer
+mcp_gateway_class: ""
+
+# Hostname for the Gateway listener and route. When empty, an sslip.io name is
+# derived from the Gateway address so no DNS record is needed.
+mcp_hostname: ""
+
+# Add sidecar.istio.io/inject to the MCP pod. Needed when the load balancer
+# talks Istio mTLS to backends (for example AKO with istioEnabled).
+mcp_istio_sidecar: false
+
+# --- AgentMinder objects -------------------------------------------------------
+
+mcp_server_name: amdemo-mcp
+agent_name: amdemo-agent
+policy_name: amdemo-agent-can-read
+
+intents:
+  - name: amdemo.read
+    description: Read-only demo tools (time, service list)
+    risk: normal
+  - name: amdemo.write
+    description: Demo tools that change state (restart a service)
+    risk: elevated
+
+tool_bindings:
+  - {tool: get_time, intent: amdemo.read}
+  - {tool: list_services, intent: amdemo.read}
+  - {tool: restart_service, intent: amdemo.write}
+
+# What the policy grants the agent. Add amdemo.write and re-run the playbook
+# to watch restart_service flip from DENIED to ALLOWED.
+granted_intents:
+  - amdemo.read
+
+# --- agent behavior ----------------------------------------------------------
+
+# Intents the agent asks for in its token request.
+agent_requested_intents:
+  - amdemo.read
+  - amdemo.write
+
+agent_calls:
+  - {tool: get_time}
+  - {tool: list_services}
+  - {tool: restart_service, args: {name: cache}}
+
+agent_interval_seconds: 60
+
+app_dir: "{{ playbook_dir }}/../app"
+am_ca: "{{ lookup('file', agentminder_ca_file | expanduser) if agentminder_ca_file | length > 0 else '' }}"

@@ -1,0 +1,14 @@
+---
+- name: AgentMinder settings are present
+  ansible.builtin.assert:
+    that:
+      - agentminder_url | length > 0
+      - agentminder_client_id | length > 0
+      - agentminder_client_secret | length > 0
+      - mcp_expose in ['loadbalancer', 'gateway', 'clusterip']
+      - mcp_expose != 'gateway' or mcp_gateway_class | length > 0
+    fail_msg: >-
+      Set agentminder_url, agentminder_client_id and agentminder_client_secret in
+      inventory/group_vars/all/local.yml (copy local.yml.example). mcp_expose must
+      be loadbalancer, gateway or clusterip, and gateway needs mcp_gateway_class.
+    quiet: true

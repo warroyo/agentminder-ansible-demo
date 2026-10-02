@@ -1,0 +1,8 @@
+.venv/
+ansible/collections/
+ansible/local/
+ansible/inventory/group_vars/all/local.yml
+__pycache__/
+*.retry
+*.kubeconfig
+*.conf
