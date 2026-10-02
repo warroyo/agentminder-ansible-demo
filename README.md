@@ -239,3 +239,7 @@ On a cluster with mesh-wide Istio `STRICT` mTLS, leave `mcp_istio_sidecar`
 at `false` for `loadbalancer`: a sidecar pod resets the plain HTTP the load
 balancer sends. Switching `mcp_expose` does not delete what the other mode
 created. Run `teardown.yml` before changing it.
+
+## License
+
+[MIT](LICENSE)
