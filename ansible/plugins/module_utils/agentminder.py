@@ -44,10 +44,13 @@ class AgentMinderError(Exception):
 
 
 class AgentMinderClient(object):
-    def __init__(self, params):
+    def __init__(self, params, authenticate=True):
         self.base = params["base_url"].rstrip("/") + "/" + params["tenant"]
         self.ctx = self._ssl_context(params)
-        self.token = self._get_token(params["client_id"], params["client_secret"])
+        self.token = None
+        if authenticate:
+            self.token = self.client_credentials(
+                params["client_id"], params["client_secret"], scope=ADMIN_SCOPES)["access_token"]
 
     @staticmethod
     def _ssl_context(params):
@@ -76,18 +79,22 @@ class AgentMinderClient(object):
                 "%s %s -> HTTP %s: %s" % (req.get_method(), req.full_url, e.code, body),
                 status=e.code, body=body)
 
-    def _get_token(self, client_id, client_secret):
+    def client_credentials(self, client_id, client_secret, scope=None, resource=None):
+        """Token response for a client_credentials grant."""
+        form = {"grant_type": "client_credentials"}
+        if scope:
+            form["scope"] = scope
+        if resource:
+            form["resource"] = resource
         basic = base64.b64encode(
             (urllib.parse.quote(client_id, safe="") + ":" +
              urllib.parse.quote(client_secret, safe="")).encode()).decode()
         req = urllib.request.Request(
             self.base + "/oauth2/v1/token",
-            data=urllib.parse.urlencode(
-                {"grant_type": "client_credentials", "scope": ADMIN_SCOPES}).encode(),
+            data=urllib.parse.urlencode(form).encode(),
             headers={"Authorization": "Basic " + basic,
                      "Content-Type": "application/x-www-form-urlencoded"})
-        _, body = self._open(req)
-        return body["access_token"]
+        return self._open(req)[1]
 
     def request(self, method, path, body=None):
         data = json.dumps(body).encode() if body is not None else None

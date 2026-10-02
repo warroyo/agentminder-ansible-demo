@@ -1,15 +1,19 @@
 ---
-# Deploy the scripted agent next to the MCP server. It only talks to the
-# AgentMinder token endpoint and gateway, never to the MCP server directly.
+# Deploy the scripted agent with the AgentMinder sidecar next to it. The agent
+# only talks to the sidecar; the sidecar talks to AgentMinder.
 
-- name: Agent config
+- name: Sidecar config
   ansible.builtin.set_fact:
-    agent_config:
-      AM_URL: "{{ agentminder_url }}/{{ agentminder_tenant }}"
-      GATEWAY_URL: "{{ mcp_app.gateway_url }}"
-      INTENTS: "{{ agent_requested_intents | map('regex_replace', '^(?!urn:)', 'urn:iam:agent:intent:') | join(' ') }}"
-      CALLS: "{{ agent_calls | to_json }}"
-      INTERVAL: "{{ agent_interval_seconds }}"
+    agent_config: "{{ _base | combine(_ca, _insecure) }}"
+  vars:
+    _base:
+      AGENTMINDER_IDSP_URL: "{{ agentminder_url }}/{{ agentminder_tenant }}"
+      AGENTMINDER_SIDECAR_RESOURCE_0_NAME: "{{ mcp_server_name }}"
+      AGENTMINDER_SIDECAR_RESOURCE_0_URL: "{{ mcp_app.gateway_url }}"
+      AGENTMINDER_SIDECAR_RESOURCE_0_AUDIENCE: "{{ mcp_app.gateway_url }}"
+      AGENTMINDER_ORCHESTRATOR_SCOPES: "{{ orchestrator_scope }}"
+    _ca: "{{ {'AGENTMINDER_CA_BUNDLE': '/app/ca.crt'} if am_ca | length > 0 else {} }}"
+    _insecure: "{{ {} if agentminder_validate_certs | bool else {'AGENTMINDER_VERIFY_SSL': 'false'} }}"
 
 - name: Agent namespace
   kubernetes.core.k8s:
@@ -19,6 +23,22 @@
       metadata:
         name: "{{ demo_namespace }}"
 
+- name: Registry login for the sidecar image
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ agent_name }}-registry"
+        namespace: "{{ demo_namespace }}"
+      type: kubernetes.io/dockerconfigjson
+      stringData:
+        .dockerconfigjson: "{{ {'auths': {agentminder_sdk_image.split('/')[0]: {'username': agentminder_registry_username, 'password': agentminder_registry_password}}} | to_json }}"
+  no_log: true
+  when: agentminder_registry_username | length > 0
+
+# sidecar_token is the local bearer token between agent and sidecar. Deriving
+# it from the client secret keeps it stable across runs.
 - name: Agent credentials
   kubernetes.core.k8s:
     definition:
@@ -31,6 +51,9 @@
       stringData:
         client_id: "{{ agent_app.client_id }}"
         client_secret: "{{ agent_app.client_secret }}"
+        orchestrator_client_id: "{{ orchestrator_app.client_id }}"
+        orchestrator_client_secret: "{{ orchestrator_app.client_secret }}"
+        sidecar_token: "{{ (agent_app.client_secret ~ ':sidecar') | hash('sha256') }}"
   no_log: true
 
 - name: Agent code and AgentMinder CA

@@ -16,6 +16,7 @@
       validate_certs: "{{ agentminder_validate_certs }}"
     agentminder_app: *am
     agentminder_policy: *am
+    agentminder_token: *am
   tasks:
     - name: Check settings
       ansible.builtin.import_tasks: tasks/preflight.yml
@@ -28,11 +29,16 @@
         state: absent
         wait: true
 
-    - name: Delete policy
+    - name: Delete policies
       agentminder_policy:
-        name: "{{ policy_name }}"
+        name: "{{ item }}"
         state: absent
+      loop:
+        - "{{ policy_name }}"
+        - "{{ orchestrator_name }}-client"
 
+    # AgentMinder answers HTTP 500 for a client that recently held a
+    # platform scope. It clears within a few minutes, so retry.
     - name: Delete apps
       agentminder_app:
         name: "{{ item.name }}"
@@ -41,7 +47,12 @@
         state: absent
       loop:
         - {name: "{{ agent_name }}", type: agent}
+        - {name: "{{ orchestrator_name }}", type: orchestrator}
         - {name: "{{ mcp_server_name }}", type: mcp_server}
+      register: _delete_app
+      until: _delete_app is succeeded
+      retries: 30
+      delay: 10
 
     - name: Delete intents
       agentminder_intent:

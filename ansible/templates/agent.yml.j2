@@ -14,31 +14,57 @@ spec:
       annotations:
         checksum/code: "{{ lookup('file', app_dir ~ '/agent.py') | hash('sha256') }}"
         checksum/config: "{{ (agent_config | to_json) | hash('sha256') }}"
-        checksum/credentials: "{{ agent_app.client_secret | hash('sha256') }}"
+        # The sidecar keeps its access token until it expires, so a policy
+        # change only shows up after a restart or when the token runs out.
+        checksum/policy: "{{ granted_intents | sort | join(' ') | hash('sha256') }}"
+        checksum/credentials: "{{ (agent_app.client_secret ~ orchestrator_app.client_secret) | hash('sha256') }}"
     spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         seccompProfile: {type: RuntimeDefault}
+{% if agentminder_registry_username %}
+      imagePullSecrets:
+        - name: {{ agent_name }}-registry
+{% endif %}
       containers:
+        # The agent: no AgentMinder credentials, only the sidecar's local token.
         - name: agent
           image: {{ python_image }}
           command: ["python", "/app/agent.py"]
           env:
             - {name: PYTHONUNBUFFERED, value: "1"}
-{% if am_ca %}
-            - {name: CA_FILE, value: /app/ca.crt}
-{% endif %}
-{% if not agentminder_validate_certs %}
-            - {name: VERIFY_TLS, value: "false"}
-{% endif %}
+            - {name: SIDECAR_URL, value: "http://127.0.0.1:8181"}
+            - {name: CALLS, value: {{ agent_calls | to_json | to_json }}}
+            - {name: INTERVAL, value: "{{ agent_interval_seconds }}"}
+            - name: SIDECAR_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ agent_name }}-credentials, key: sidecar_token}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: code, mountPath: /app}
+        # AgentMinder sidecar: holds the agent's client credentials, gets
+        # tokens and forwards MCP calls to the AgentMinder gateway.
+        - name: agentminder-sidecar
+          image: {{ agentminder_sdk_image }}
+          command: ["uvicorn", "agentminder.sidecar:app", "--host", "127.0.0.1", "--port", "8181"]
+          env:
 {% for k, v in agent_config.items() %}
             - {name: {{ k }}, value: {{ v | string | to_json }}}
 {% endfor %}
-            - name: CLIENT_ID
+            - name: AGENTMINDER_SIDECAR_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ agent_name }}-credentials, key: sidecar_token}}
+            - name: AGENTMINDER_SIDECAR_AGENT_CLIENT_ID
               valueFrom: {secretKeyRef: {name: {{ agent_name }}-credentials, key: client_id}}
-            - name: CLIENT_SECRET
+            - name: AGENTMINDER_SIDECAR_AGENT_CLIENT_SECRET
               valueFrom: {secretKeyRef: {name: {{ agent_name }}-credentials, key: client_secret}}
+            # Orchestrator client. Without missions the sidecar only uses it
+            # to read the agent's profile.
+            - name: AGENTMINDER_ORCHESTRATOR_CLIENT_ID
+              valueFrom: {secretKeyRef: {name: {{ agent_name }}-credentials, key: orchestrator_client_id}}
+            - name: AGENTMINDER_ORCHESTRATOR_CLIENT_SECRET
+              valueFrom: {secretKeyRef: {name: {{ agent_name }}-credentials, key: orchestrator_client_secret}}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL]}

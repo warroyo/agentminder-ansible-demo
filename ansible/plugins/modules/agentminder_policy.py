@@ -3,13 +3,16 @@
 
 DOCUMENTATION = r"""
 module: agentminder_policy
-short_description: Manage an AgentMinder authorization policy that grants intents to agents
+short_description: Manage an AgentMinder authorization policy that grants intents or scopes to client apps
 description:
   - Manages one native C(role) policy (C(/admin/v1/AuthZPolicies)) with a single
     grant rule. The policy targets one MCP resource server and grants a list of
     intents to a list of agents.
   - Agents and the resource server are given by name and resolved to internal
     app IDs. Policies select agents by app ID, not OAuth client ID.
+  - The same policy shape grants platform scopes. Target the platform app
+    (C(SSP)) and grant C(urn:iam:t.aiagentorchestrationclient) to make a client
+    an SDK orchestrator.
   - Rule IDs the server generates are ignored when comparing, so re-runs do not
     report drift.
 options:
@@ -84,6 +87,13 @@ def main():
             module.exit_json(**result)
 
         apps = {a["name"]: a for a in client.list_apps()}
+        if p["resource_server"] not in apps:
+            # The platform's own app (SSP) is not listed under Apps. Take its
+            # ID from a built-in policy that targets it.
+            for pol in client.request("GET", PATH) or []:
+                for a in pol.get("apps") or []:
+                    if a.get("name") == p["resource_server"]:
+                        apps[a["name"]] = {"appId": a["id"], "name": a["name"]}
         missing = [n for n in [p["resource_server"]] + p["agents"] if n not in apps]
         if missing:
             module.fail_json(msg="apps not found: %s" % ", ".join(missing))

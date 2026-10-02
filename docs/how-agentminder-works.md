@@ -8,17 +8,19 @@ all deployed by a single `ansible-playbook site.yml` run.
 
 What it shows, on AgentMinder `4.1.1`:
 
-- The agent gets a token that carries only the **intents** a policy grants it.
+- The agent holds no AgentMinder credentials. The AgentMinder sidecar in its
+  pod gets a token that carries only the **intents** a policy grants.
 - The gateway filters `tools/list` to the tools those intents cover, and
   blocks `tools/call` on the rest with HTTP 403.
 - Changing the policy (granting or revoking `amdemo.write`) changes what the
-  agent can do on its next token. The agent and the MCP server do not change.
+  agent can do on its next token. The agent code and the MCP server do not
+  change.
 - Every allow and deny is written to the gateway audit log with the agent,
   tool, intent and decision.
 
-The agent has no LLM. Every 60 seconds it gets a token, lists tools, and calls
-`get_time`, `list_services` and `restart_service`, so the allow/deny behavior
-is easy to see.
+The agent has no LLM. Every 60 seconds it lists tools and calls `get_time`,
+`list_services` and `restart_service`, so the allow/deny behavior is easy to
+see.
 
 ## Contents
 
@@ -36,7 +38,10 @@ is easy to see.
 ```mermaid
 flowchart LR
   subgraph dev["demo cluster / ns agentminder-demo"]
-    agent["amdemo-agent pod<br/>scripted loop, stdlib only"]
+    subgraph pod["amdemo-agent pod"]
+      agent["agent container<br/>scripted loop, stdlib only"]
+      sidecar["agentminder-sidecar<br/>SDK image, 127.0.0.1:8181"]
+    end
     gw["LoadBalancer Service<br/>or Gateway + HTTPRoute"]
     mcp["mcp-server pod<br/>FastMCP"]
   end
@@ -45,17 +50,19 @@ flowchart LR
     aigw["AI gateway<br/>/default/aigateway/v1/mcp/&lt;route&gt;"]
     pdp["PDP (idsp-pdp)<br/>policies + intents"]
   end
-  agent -- "1. client_credentials<br/>scope = intents, resource = route" --> token
+  agent -- "1. MCP JSON-RPC<br/>local bearer token" --> sidecar
+  sidecar -- "2. client_credentials<br/>scope = urn:iam:myscopes, resource = route" --> token
   token -. "evaluates policy" .-> pdp
-  agent -- "2. MCP JSON-RPC + Bearer token" --> aigw
+  sidecar -- "3. MCP JSON-RPC + access token" --> aigw
   aigw -. "authorize tool call" .-> pdp
-  aigw -- "3. allowed calls only (HTTP)" --> gw
+  aigw -- "4. allowed calls only (HTTP)" --> gw
   gw --> mcp
 ```
 
 | Component | Where | What it does |
 |---|---|---|
-| `amdemo-agent` | demo cluster, `agentminder-demo` | Gets a token, speaks MCP to the gateway route, logs ALLOWED/DENIED per call. Knows only the token URL and gateway URL. |
+| `agent` container | `amdemo-agent` pod | Posts `tools/list` and `tools/call` to the sidecar and logs ALLOWED/DENIED. Knows only the sidecar URL and a local bearer token. |
+| `agentminder-sidecar` container | `amdemo-agent` pod | AgentMinder SDK (`uvicorn agentminder.sidecar:app`). Holds the agent and orchestrator client credentials, gets tokens, keeps the MCP session and forwards calls to the gateway. Listens on loopback only. |
 | AgentMinder token endpoint | AgentMinder | Issues OAuth tokens. Puts only policy-granted intents in the token's `scope`. |
 | AgentMinder AI gateway | AgentMinder | MCP proxy. Checks the token, filters `tools/list`, authorizes each `tools/call` against tool bindings and policy, forwards allowed calls. |
 | `mcp-server` | demo cluster, `agentminder-demo` | Plain FastMCP server with three tools. Does no auth of its own. |
@@ -68,8 +75,8 @@ traffic from the gateway.
 
 ## Object model
 
-AgentMinder needs four kinds of object for this demo. They depend on each
-other in this order, which is also the order the playbook creates them:
+AgentMinder needs five objects for this demo. They depend on each other in
+this order, which is also the order the playbook creates them:
 
 ```mermaid
 flowchart LR
@@ -77,6 +84,7 @@ flowchart LR
   rs --> agentapp["Agent app<br/>amdemo-agent<br/>OAuth client"]
   agentapp --> policy["Policy<br/>amdemo-agent-can-read<br/>agent + server -> intents"]
   rs --> policy
+  orch["Orchestrator client<br/>amdemo-orchestrator"] --> orchpol["Policy<br/>amdemo-orchestrator-client<br/>platform scope"]
 ```
 
 ### Intents
@@ -132,11 +140,41 @@ the `client_credentials` grant. The fields that matter:
 |---|---|---|
 | `agentDelegationMode` | `AUTONOMOUS` | Acts as itself, not on behalf of a user in a mission |
 | `agentRiskLevel` | `standard` | Risk label, available to policy |
-| `agentUseAllAllowedIntents` | `false` | Token carries only the intents requested **and** allowed |
+| `agentUseAllAllowedIntents` | `true` | The sidecar asks for no specific intents; the token carries every intent a policy grants |
 
 An app has two IDs. `appId` is the internal ID that policies use. `clientId`
 is the OAuth client ID the agent authenticates with. Mixing them up is the
 easiest mistake to make with policies.
+
+### Orchestrator client
+
+The SDK sidecar needs a second identity next to the agent's. It uses it for
+control-plane calls: reading the agent's profile, and creating missions when
+missions are in use. The agent's own token cannot make those calls
+(`401 Unprivileged access token`).
+
+The orchestrator is a plain confidential client, not an agent app
+(`isAgentApp: false`, `client_credentials` only). What makes it an
+orchestrator is a policy on the platform's own app, `SSP`, that grants it the
+scope `urn:iam:t.aiagentorchestrationclient`:
+
+```json
+{
+  "policyName": "amdemo-orchestrator-client",
+  "policySubType": "role",
+  "apps": [{"id": "<SSP appId>", "name": "SSP"}],
+  "rules": [{
+    "conditions": {"principal": {"clientApp": {"operator": "in", "value": ["<amdemo-orchestrator appId>"]}}},
+    "result": {"effect": "grant", "privileges": ["urn:iam:t.aiagentorchestrationclient"]}
+  }]
+}
+```
+
+`SSP` is not listed under `/admin/v1/Apps`. Its ID appears in the `apps`
+field of the built-in policies. The orchestrator must ask for the scope
+explicitly (`AGENTMINDER_ORCHESTRATOR_SCOPES`). Until the policy takes effect,
+a few seconds after it is created, the token endpoint answers
+`400 Invalid scope`.
 
 ### Policy
 
@@ -169,90 +207,128 @@ One agent cycle with the default policy (read only):
 ```mermaid
 sequenceDiagram
   autonumber
-  participant A as amdemo-agent
+  participant A as agent container
+  participant S as AgentMinder sidecar
   participant T as AgentMinder token endpoint
   participant G as AgentMinder AI gateway
   participant P as PDP (idsp-pdp)
-  participant M as mcp-server (demo cluster)
+  participant M as mcp-server
 
-  A->>T: POST /default/oauth2/v1/token<br/>grant_type=client_credentials<br/>scope=amdemo.read amdemo.write<br/>resource=<gateway route URL>
-  T->>P: which requested intents does policy grant?
-  P-->>T: amdemo.read only
-  T-->>A: access_token, scope = amdemo.read (write silently dropped)
+  Note over S,T: once, at sidecar start
+  S->>T: orchestrator token (scope urn:iam:t.aiagentorchestrationclient)
+  S->>T: GET /auth/v1/AgentClientProfileHelper/<agent clientId>
+  T-->>S: useAllAllowedIntents = true
+  S->>T: agent token: client_credentials<br/>scope=urn:iam:myscopes<br/>resource=<gateway route URL>
+  T->>P: which intents does policy grant?
+  P-->>T: amdemo.read
+  T-->>S: access_token, scope = amdemo.read
+  S->>G: initialize, tools/list
+  G-->>S: get_time, list_services (filtered by token intents)
 
-  A->>G: initialize (protocolVersion 2025-06-18)
-  G->>M: initialize
-  M-->>G: 200
-  G-->>A: 200 + Mcp-Session-Id
-
-  A->>G: tools/list
-  G->>M: tools/list
-  M-->>G: get_time, list_services, restart_service
-  G-->>A: get_time, list_services (filtered by token intents)
-
-  A->>G: tools/call get_time
+  Note over A,M: every cycle
+  A->>S: tools/list (local bearer token)
+  S-->>A: get_time, list_services
+  A->>S: tools/call get_time
+  S->>G: tools/call get_time + access token
   G->>P: tool bound to amdemo.read, token has it
   P-->>G: allow
   G->>M: tools/call get_time
   M-->>G: result
-  G-->>A: 200 result (audit: tool.allow)
+  G-->>S: 200 result (audit: tool.allow)
+  S-->>A: result
 
-  A->>G: tools/call restart_service
+  A->>S: tools/call restart_service
+  S->>G: tools/call restart_service + access token
   G->>P: tool bound to amdemo.write, token lacks it
   P-->>G: deny
-  G-->>A: 403 (audit: tool.deny). Backend never called.
+  G-->>S: 403 (audit: tool.deny). Backend never called.
+  S-->>A: JSON-RPC error "policy denied tool"
 ```
 
-### 1. Token request
+### 1. Agent to sidecar
 
-The agent asks for every intent it might need. The policy decides which ones
-it gets:
+The agent posts plain MCP JSON-RPC to `http://127.0.0.1:8181/mcp` with
+`Authorization: Bearer <AGENTMINDER_SIDECAR_TOKEN>`. That token is a shared
+local secret; the sidecar refuses to start without it. The agent needs no
+`initialize`, session ID or protocol version. The sidecar supports
+`initialize`, `tools/list` and `tools/call`, and answers a denied call with
+HTTP 200 and a JSON-RPC error.
+
+Other sidecar endpoints: `GET /healthz` (no auth), `GET /info` (SDK, server
+and resource report), `GET /mission`, `POST /mission/renew`, and
+`/proxy/<path>` for raw HTTP with credentials added.
+
+Sidecar settings used here:
+
+| Variable | Value |
+|---|---|
+| `AGENTMINDER_IDSP_URL` | `https://agentminder.example.com/default` |
+| `AGENTMINDER_SIDECAR_TOKEN` | local bearer token shared with the agent |
+| `AGENTMINDER_SIDECAR_AGENT_CLIENT_ID` / `_CLIENT_SECRET` | the agent app's client |
+| `AGENTMINDER_ORCHESTRATOR_CLIENT_ID` / `_CLIENT_SECRET` | the orchestrator client |
+| `AGENTMINDER_ORCHESTRATOR_SCOPES` | `urn:iam:t.aiagentorchestrationclient` |
+| `AGENTMINDER_SIDECAR_RESOURCE_0_NAME` / `_URL` / `_AUDIENCE` | `amdemo-mcp` and the gateway route URL |
+| `AGENTMINDER_CA_BUNDLE` | CA file for the AgentMinder certificate |
+
+`AGENTMINDER_SIDECAR_MISSION_TYPE` is not set, so no mission is created.
+
+### 2. Token request
+
+With no mission, the sidecar reads the agent's profile with the orchestrator
+token. Because the agent has `useAllAllowedIntents: true`, it then asks for
+the scope `urn:iam:myscopes`, which AgentMinder resolves to every intent a
+policy grants this agent on this resource:
 
 ```
 POST https://agentminder.example.com/default/oauth2/v1/token
-Authorization: Basic base64(clientId:clientSecret)
 Content-Type: application/x-www-form-urlencoded
 
 grant_type=client_credentials
+&client_id=<agent clientId>&client_secret=<agent secret>
 &resource=https://agentminder.example.com/default/aigateway/v1/mcp/<route>
-&scope=urn:iam:agent:intent:amdemo.read urn:iam:agent:intent:amdemo.write
+&scope=urn:iam:myscopes
 ```
 
 Notes on this request:
 
-- **`resource` (RFC 8707) is required.** Without it, any intent scope returns
-  `400 invalid_request "Invalid scope"`. `audience=` does not work in its
-  place. `resource` tells AgentMinder which resource server's policies apply.
-- **Do not add `openid`** to the scope. The request fails again.
-- **Intents the policy does not grant are dropped silently.** The request
-  still succeeds, and the token's `scope` shows what was granted. The agent
-  logs it as `granted scopes: urn:iam:agent:intent:amdemo.read urn:iam:m.meclient`.
+- **`resource` (RFC 8707) is required.** Without it, `urn:iam:myscopes` or
+  any intent scope yields no intents (`urn:iam:m.meclient` only), and naming
+  an intent scope returns `400 invalid_request "Invalid scope"`. `audience=`
+  does not work in its place. `resource` tells AgentMinder which resource
+  server's policies apply.
+- **Do not add `openid`** to the scope. The request fails.
+- **If the profile cannot be read, the sidecar asks for no scopes.** The token
+  then carries no intents and `tools/list` comes back empty. That is what
+  happens without a working orchestrator client.
+- A client can also name intents itself
+  (`scope=urn:iam:agent:intent:amdemo.read ...`). Intents the policy does not
+  grant are dropped silently.
 - The token's `aud` is `[<gateway route URL>, https://agentminder.example.com/default/]`.
+- **The sidecar keeps the token until it expires** (one hour). See
+  [Grant and revoke](#grant-and-revoke).
 
-### 2. MCP session through the gateway
+### 3. MCP session through the gateway
 
-The agent speaks MCP over streamable HTTP (JSON-RPC in a POST body) to the
+The sidecar speaks MCP over streamable HTTP (JSON-RPC in a POST body) to the
 gateway route, with the token as a Bearer header.
 
 - **The gateway only accepts MCP protocol versions `2025-06-18` and
   `2025-11-25`.** `2025-03-26` or `2024-11-05` returns HTTP 200 with a
   JSON-RPC error: `{"code":2003,"message":"AI Gateway: Backend does not
-  support a compatible protocol version"}`. The message is misleading. The
-  backend (`mcp` 1.30.0) accepts both older versions when called directly.
-  Check the body for `error`, not just the HTTP status. The agent sends
-  `2025-06-18` in `initialize` and in an `MCP-Protocol-Version` header; the
-  header is optional on `initialize`.
+  support a compatible protocol version"}`, even when the backend accepts
+  those versions directly. The sidecar uses `2025-06-18`.
 - The gateway returns its own `Mcp-Session-Id`, a signed JWT that records the
-  backend URL and capabilities. The agent sends it back on each later call.
-- `notifications/initialized` returns `202`.
+  backend URL and capabilities. The sidecar sends it back on each later call.
 
-### 3. Filtered tool discovery
+### 4. Filtered tool discovery
 
 `tools/list` passes through to the backend, but the gateway removes tools the
 token's intents do not cover. With read-only access the agent sees
-`['get_time', 'list_services']`. `restart_service` is not listed at all.
+`['get_time', 'list_services']`. `restart_service` is not listed at all. The
+sidecar lists tools once per session and serves later `tools/list` calls from
+that copy.
 
-### 4. Per-call authorization
+### 5. Per-call authorization
 
 For each `tools/call` the gateway looks up the tool's binding, takes the
 bound intent, and asks the PDP whether this agent holds it for this resource
@@ -271,7 +347,6 @@ Deny logs carry the reason from the PDP:
 ```
 authorize: request denied for sub=<agent clientId> by PDP "idsp-pdp"
 reason: Computed allowed scopes '[]' does not contain requested scopes: '[urn:iam:agent:intent:amdemo.write]'
-MCP: tools/call request denied — Computed allowed scopes '[]' does not contain requested scopes: '[urn:iam:agent:intent:amdemo.write]' (policy "authorize")
 MCP: tool call "restart_service" denied on backend "amdemo-mcp": policy/authorize
 ```
 
@@ -280,27 +355,36 @@ granted this". It is not a policy you created.
 
 ## Grant and revoke
 
-Policy changes take effect on the agent's next token. The agent and the MCP
-server are not touched. One cycle of the 60-second agent loop per row:
+A policy change applies to **new tokens**. Two delays matter:
+
+- AgentMinder takes up to about a minute to apply a policy change at the
+  token endpoint.
+- The sidecar keeps its token for the token's lifetime (one hour), so a
+  running agent keeps its old intents until then.
+
+The playbook handles both. After changing the policy it waits until a fresh
+token for the agent carries exactly `granted_intents`
+(`agentminder_token`), then restarts the agent pod so the sidecar starts with
+a new token.
 
 | Step | Policy grants | Token scope | `tools/list` | `restart_service` |
 |---|---|---|---|---|
-| start | `amdemo.read` | read | `get_time`, `list_services` | DENIED, HTTP 403 |
+| start | `amdemo.read` | read | `get_time`, `list_services` | DENIED |
 | grant `amdemo.write` | `amdemo.read`, `amdemo.write` | read + write | all three | ALLOWED, `restarted cache` |
-| revoke `amdemo.write` | `amdemo.read` | read | `get_time`, `list_services` | DENIED, HTTP 403 |
+| revoke `amdemo.write` | `amdemo.read` | read | `get_time`, `list_services` | DENIED |
 
-To reproduce:
+To reproduce, from `ansible/`:
 
 ```bash
 # grant write
-ansible-playbook site.yml --tags agentminder \
+ansible-playbook site.yml \
   -e '{"granted_intents": ["amdemo.read", "amdemo.write"]}'
 
 # revoke: re-run with the defaults
-ansible-playbook site.yml --tags agentminder
+ansible-playbook site.yml
 
 # watch the agent
-kubectl -n agentminder-demo logs deploy/amdemo-agent -f
+kubectl -n agentminder-demo logs deploy/amdemo-agent -c agent -f
 
 # gateway audit trail, on the AgentMinder cluster (names depend on the install)
 kubectl -n ssp logs deploy/ssp-ssp-aigateway -c ssp-aigateway --since=10m \
@@ -362,10 +446,12 @@ so clients need `VERIFY_X509_PARTIAL_CHAIN` (Python) to trust it as an anchor.
 | App | `POST /admin/v1/Apps` | Payload mirrors the console's `createApplication` (`apptype_agent` / `apptype_mcp_server` presets) |
 | App | `GET /admin/v1/Apps/{appId}?resolveMetadataObjIds=true` | Full object |
 | App | `PUT /admin/v1/Apps/{appId}?resolveMetadataObjIds=true` | Full-object replace. Drop `secret`, `createdBy`, `updatedBy`, `createdDateTime`, `updatedDateTime` first |
-| App | `DELETE /admin/v1/Apps/{appId}?force=true` | |
+| App | `DELETE /admin/v1/Apps/{appId}?force=true` | Returns `500` for a few minutes for a client that recently held a platform scope; retry |
 | Tool bindings | `agentToolBindings` field on the app, written with the app `PUT` | Readable on its own via `AgentToolBindingsHelper?appId=` |
 | Policy | `GET /admin/v1/AuthZPolicies?filter=(policyName eq <name>)` | |
-| Policy | `POST /admin/v1/AuthZPolicies`, `PUT/DELETE .../{policyId}` | Server adds rule IDs; ignore them when comparing |
+| Policy | `POST /admin/v1/AuthZPolicies`, `PUT/DELETE .../{policyId}` | Server adds rule IDs; ignore them when comparing. The same shape, targeting app `SSP`, grants platform scopes such as `urn:iam:t.aiagentorchestrationclient` |
+| Agent profile | `GET /auth/v1/AgentClientProfileHelper/{clientId}` | Called by the sidecar, not the modules. Needs `urn:iam:t.aiagentorchestrationclient` or `urn:iam:t.airesources` |
+| Token | `POST /oauth2/v1/token` | `agentminder_token` uses it to read back granted scopes |
 | Gateway routes | `GET .../AIGateways/groups/default/routes` (exact prefix not recorded) | Summaries only. `.../routes/{name}` returned 404 `Unknown gateway route` |
 
 ## Automation
@@ -377,10 +463,10 @@ ansible/
   site.yml
     tasks/preflight.yml    check that the AgentMinder settings are present
     tasks/mcp_server.yml   MCP server + its exposure on the demo cluster
-    tasks/agentminder.yml  intents -> resource server -> agent -> policy
-    tasks/agent.yml        agent Secret, ConfigMap, Deployment
+    tasks/agentminder.yml  intents -> resource server -> agent -> orchestrator -> policies
+    tasks/agent.yml        registry login, Secret, ConfigMap, Deployment (agent + sidecar)
   teardown.yml             reverse of the above
-  plugins/modules/         agentminder_intent, agentminder_app, agentminder_policy
+  plugins/modules/         agentminder_intent, agentminder_app, agentminder_policy, agentminder_token
   plugins/module_utils/    agentminder.py (shared admin API client)
   inventory/group_vars/all/defaults.yml, local.yml
 app/                       agent.py, mcp_server.py
@@ -389,8 +475,9 @@ app/                       agent.py, mcp_server.py
 | Module | Manages | Notes |
 |---|---|---|
 | `agentminder_intent` | One catalog intent | |
-| `agentminder_app` | `type: agent` or `type: mcp_server` | Creates with `POST`, then converges only the managed fields with a full-object `PUT`, then re-reads and fails if they did not converge. Returns `app_id`, `client_id`, `gateway_url`, optionally `client_secret` |
-| `agentminder_policy` | One `role` policy with one grant rule | Takes app **names** and resolves them to `appId`s |
+| `agentminder_app` | `type: agent`, `type: orchestrator` or `type: mcp_server` | Creates with `POST`, then converges only the managed fields with a full-object `PUT`, then re-reads and fails if they did not converge. Returns `app_id`, `client_id`, `gateway_url`, optionally `client_secret` |
+| `agentminder_policy` | One `role` policy with one grant rule | Takes app **names** and resolves them to `appId`s. Grants intents on a resource server, or platform scopes on `SSP` |
+| `agentminder_token` | Nothing; read-only | Returns the scopes and intents a client is granted. Used with `until` to wait for a policy change |
 
 Design choices:
 
@@ -400,16 +487,22 @@ Design choices:
 - **Idempotent with check mode.** Each module compares only what it manages,
   ignoring server-added keys and order. A second `site.yml` run reports
   `changed=0`.
-- **Settings in one file.** The AgentMinder URL, admin client and CA are set
-  in the git-ignored `local.yml`. The agent's client secret is returned by
-  `agentminder_app` under `no_log` and goes into a Kubernetes Secret on the
-  demo cluster.
-- **Code from ConfigMaps.** Both pods run stock `python:3.12-slim` with the
-  code mounted from a ConfigMap. They run as non-root with all capabilities
-  dropped, so they pass Pod Security `restricted`. A checksum annotation restarts the pod when
-  the code, config or credentials change.
-- **Tags for the demo.** `--tags agentminder` re-runs only the registration,
-  which is how the grant and revoke steps work.
+- **Settings in one file.** The AgentMinder URL, admin client, CA and
+  registry login are set in the git-ignored `local.yml`. The agent and
+  orchestrator client secrets are returned by `agentminder_app` under
+  `no_log` and go into a Kubernetes Secret on the demo cluster.
+- **Waits instead of sleeps.** AgentMinder applies policy changes after a
+  short delay. The playbook polls with `agentminder_token` until the
+  orchestrator holds its scope and until agent tokens match
+  `granted_intents`, so the sidecar never starts with a stale token.
+- **Code from ConfigMaps.** The agent and the MCP server run stock
+  `python:3.12-slim` with the code mounted from a ConfigMap. The sidecar
+  runs the AgentMinder SDK image unchanged. All containers run as non-root
+  with all capabilities dropped, so the pods pass Pod Security `restricted`.
+  Checksum annotations restart the agent pod when the code, sidecar
+  settings, credentials or granted intents change.
+- **Tags.** `mcp` runs the MCP server only, `agentminder` adds the
+  registration, `agent` runs everything.
 
 ## Networking
 
@@ -435,15 +528,19 @@ For Avi (AKO) with Istio, see [avi-ako-notes.md](avi-ako-notes.md).
   returns every app's client secret in plain text. The demo uses the tenant
   bootstrap client, kept in a git-ignored file. A dedicated, narrowly scoped
   admin client would be better.
+- **The orchestrator secret sits in the agent pod.** The sidecar needs it,
+  and its scope covers agent orchestration for the tenant, not only this
+  agent. Keep it in the sidecar container only; the agent container gets
+  just the local sidecar token.
+- **Revoking an intent does not cut off a running sidecar.** It keeps its
+  token for up to an hour. Restart the agent pod to apply a revoke at once;
+  the playbook does this.
 - **The MCP backend is unauthenticated.** The gateway enforces policy, but
-  its load balancer address is reachable directly. Restrict the backend to gateway traffic
-  in anything beyond a demo.
+  its load balancer address is reachable directly. Restrict the backend to
+  gateway traffic in anything beyond a demo.
 - **Backend traffic is plain HTTP** from the gateway to the MCP server
   address (`mcpIgnoreSslValidation: true`).
 - **Not covered:** missions and delegated agents
   (`agentDelegationMode` other than `AUTONOMOUS`), intent tokens
-  (`mcpRequireIntentToken`), DPoP, and an LLM-driven agent.
-- **Agent apps differ slightly from console-created ones.** The console sets
-  `allowedOperations: [introspect]`, `userInfoEndpointResponseFormat:
-  PLAIN_JSON` and `skipIssuerAudienceForIT: true`. The demo does not need
-  them.
+  (`mcpRequireIntentToken`), DPoP, workload identity, and an LLM-driven
+  agent.

@@ -3,10 +3,14 @@
 
 DOCUMENTATION = r"""
 module: agentminder_app
-short_description: Manage an AgentMinder agent app or MCP resource server
+short_description: Manage an AgentMinder agent app, orchestrator client or MCP resource server
 description:
   - C(type=agent) registers an AI agent: an OAuth confidential client that gets
     tokens with C(client_credentials).
+  - C(type=orchestrator) registers a plain confidential client for the SDK or
+    sidecar control-plane calls (agent profile, missions). It gets its rights
+    from an authorization policy that grants
+    C(urn:iam:t.aiagentorchestrationclient), see M(agentminder_policy).
   - C(type=mcp_server) registers an AI resource server for one MCP backend. It
     carries the backend URL, the gateway enforcement flags, the intents the
     server exposes and the tool-to-intent bindings. AgentMinder generates a
@@ -15,7 +19,7 @@ description:
     as the server set it.
 options:
   name: {type: str, required: true}
-  type: {type: str, required: true, choices: [agent, mcp_server]}
+  type: {type: str, required: true, choices: [agent, orchestrator, mcp_server]}
   description: {type: str, default: ""}
   state: {type: str, default: present, choices: [present, absent]}
   risk_level:
@@ -114,6 +118,15 @@ def base_payload(p):
             "agentMaxDelegationDepth": 0,
             "agentMissionCredentialType": None,
         })
+    elif p["type"] == "orchestrator":
+        payload.update({
+            "allowedGrantTypes": ["client_credentials"],
+            "allowedOpenIDScopes": [],
+            "allowedOperations": ["introspect"],
+            "isAgentApp": False,
+            "isResourceServerApp": False,
+            "isAiResourceServerApp": False,
+        })
     else:
         payload.update({
             "allowedGrantTypes": ["client_credentials"],
@@ -135,6 +148,8 @@ def managed_fields(p, app_id, client=None):
             "agentDelegationMode": p["delegation_mode"],
             "agentUseAllAllowedIntents": p["use_all_allowed_intents"],
         })
+        return f
+    if p["type"] == "orchestrator":
         return f
     audience = p["primary_audience"]
     if not audience:
@@ -180,7 +195,7 @@ def main():
     spec = connection_argument_spec()
     spec.update(
         name=dict(type="str", required=True),
-        type=dict(type="str", required=True, choices=["agent", "mcp_server"]),
+        type=dict(type="str", required=True, choices=["agent", "orchestrator", "mcp_server"]),
         description=dict(type="str", default=""),
         state=dict(type="str", default="present", choices=["present", "absent"]),
         risk_level=dict(type="str", default="standard"),

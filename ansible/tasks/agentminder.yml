@@ -28,9 +28,43 @@
     description: AgentMinder demo agent ({{ demo_namespace }})
     risk_level: standard
     delegation_mode: AUTONOMOUS
+    # The sidecar asks for no specific intents; the token carries whatever
+    # the policy grants.
+    use_all_allowed_intents: true
     return_secret: true
   register: agent_app
   no_log: true
+
+# The sidecar reads the agent's profile with a second, orchestrator client.
+- name: Orchestrator client for the sidecar
+  agentminder_app:
+    name: "{{ orchestrator_name }}"
+    type: orchestrator
+    description: AgentMinder demo sidecar orchestrator ({{ demo_namespace }})
+    return_secret: true
+  register: orchestrator_app
+  no_log: true
+
+- name: Policy making it an orchestrator
+  agentminder_policy:
+    name: "{{ orchestrator_name }}-client"
+    description: "{{ orchestrator_name }} may run agent orchestration operations"
+    resource_server: "{{ agentminder_platform_app }}"
+    agents: ["{{ orchestrator_name }}"]
+    intents: ["{{ orchestrator_scope }}"]
+
+# Until the policy takes effect the token endpoint answers "Invalid scope".
+- name: Wait for the orchestrator scope to be granted
+  agentminder_token:
+    client_id: "{{ orchestrator_app.client_id }}"
+    client_secret: "{{ orchestrator_app.client_secret }}"
+    scope: ["{{ orchestrator_scope }}"]
+  register: _orchestrator_token
+  until: orchestrator_scope in (_orchestrator_token.scopes | default([]))
+  retries: 60
+  delay: 2
+  no_log: true
+  when: not ansible_check_mode
 
 - name: Policy granting intents to the agent
   agentminder_policy:
@@ -41,9 +75,25 @@
     intents: "{{ granted_intents }}"
   register: policy
 
+# A policy change reaches new tokens a few seconds later. Wait for it, so the
+# agent restarted by the next step starts with the right token.
+- name: Wait for the policy to reach agent tokens
+  agentminder_token:
+    client_id: "{{ agent_app.client_id }}"
+    client_secret: "{{ agent_app.client_secret }}"
+    scope: [urn:iam:myscopes]
+    resource: "{{ mcp_app.gateway_url }}"
+  register: _agent_token
+  until: (_agent_token.intents | default(none)) == (granted_intents | sort)
+  retries: 60
+  delay: 2
+  no_log: true
+  when: not ansible_check_mode
+
 - name: Summary
   ansible.builtin.debug:
     msg:
       - "MCP server app {{ mcp_app.app_id }} -> gateway {{ mcp_app.gateway_url }}"
       - "Agent app {{ agent_app.app_id }} client {{ agent_app.client_id }}"
+      - "Orchestrator app {{ orchestrator_app.app_id }} client {{ orchestrator_app.client_id }}"
       - "Policy {{ policy_name }} ({{ policy.policy_id }}) grants {{ granted_intents }}"

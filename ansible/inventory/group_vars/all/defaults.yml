@@ -49,6 +49,7 @@ mcp_istio_sidecar: false
 
 mcp_server_name: amdemo-mcp
 agent_name: amdemo-agent
+orchestrator_name: amdemo-orchestrator
 policy_name: amdemo-agent-can-read
 
 intents:
@@ -69,12 +70,19 @@ tool_bindings:
 granted_intents:
   - amdemo.read
 
-# --- agent behavior ----------------------------------------------------------
+# --- agent ---------------------------------------------------------------------
 
-# Intents the agent asks for in its token request.
-agent_requested_intents:
-  - amdemo.read
-  - amdemo.write
+# AgentMinder SDK image; runs as the sidecar in the agent pod.
+agentminder_sdk_image: securityservices.packages.broadcom.com/agentminder-sdk:4.1.1.1673
+
+# Login for that image's registry. Leave empty if the cluster can already
+# pull the image.
+agentminder_registry_username: ""
+agentminder_registry_password: ""
+
+# The platform's own app and the scope that makes a client an orchestrator.
+agentminder_platform_app: SSP
+orchestrator_scope: urn:iam:t.aiagentorchestrationclient
 
 agent_calls:
   - {tool: get_time}

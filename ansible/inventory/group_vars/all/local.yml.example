@@ -11,6 +11,10 @@ agentminder_client_secret: "..."
 # CA that signed the AgentMinder certificate. Drop this line for a public CA.
 agentminder_ca_file: ~/agentminder-ca.crt
 
+# Registry login for the AgentMinder SDK image (agent sidecar).
+agentminder_registry_username: "..."
+agentminder_registry_password: "..."
+
 # --- optional ------------------------------------------------------------------
 
 # Demo cluster. Defaults to $KUBECONFIG or ~/.kube/config, current context.

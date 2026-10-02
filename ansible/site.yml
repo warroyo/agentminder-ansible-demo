@@ -18,6 +18,7 @@
       validate_certs: "{{ agentminder_validate_certs }}"
     agentminder_app: *am
     agentminder_policy: *am
+    agentminder_token: *am
   tasks:
     - name: Check settings
       ansible.builtin.import_tasks: tasks/preflight.yml
