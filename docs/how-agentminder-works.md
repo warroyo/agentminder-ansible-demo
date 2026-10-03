@@ -40,18 +40,19 @@ flowchart LR
   subgraph dev["demo cluster / ns agentminder-demo"]
     subgraph pod["amdemo-agent pod"]
       agent["agent container<br/>scripted loop, stdlib only"]
-      sidecar["agentminder-sidecar<br/>SDK image, 127.0.0.1:8181"]
+      sidecar["agentminder-sidecar<br/>SDK image, 127.0.0.1:8181<br/>agent + orchestrator creds"]
     end
     gw["LoadBalancer Service<br/>or Gateway + HTTPRoute"]
     mcp["mcp-server pod<br/>FastMCP"]
   end
   subgraph am["AgentMinder"]
-    token["Token endpoint<br/>/default/oauth2/v1/token"]
+    token["Token endpoint + agent profile API<br/>/default/oauth2/v1/token<br/>/auth/v1/AgentClientProfileHelper"]
     aigw["AI gateway<br/>/default/aigateway/v1/mcp/&lt;route&gt;"]
     pdp["PDP (idsp-pdp)<br/>policies + intents"]
   end
   agent -- "1. MCP JSON-RPC<br/>local bearer token" --> sidecar
-  sidecar -- "2. client_credentials<br/>scope = urn:iam:myscopes, resource = route" --> token
+  sidecar -- "2a. orchestrator token<br/>+ read agent profile" --> token
+  sidecar -- "2b. agent token: client_credentials<br/>scope = urn:iam:myscopes, resource = route" --> token
   token -. "evaluates policy" .-> pdp
   sidecar -- "3. MCP JSON-RPC + access token" --> aigw
   aigw -. "authorize tool call" .-> pdp
@@ -63,7 +64,7 @@ flowchart LR
 |---|---|---|
 | `agent` container | `amdemo-agent` pod | Posts `tools/list` and `tools/call` to the sidecar and logs ALLOWED/DENIED. Knows only the sidecar URL and a local bearer token. |
 | `agentminder-sidecar` container | `amdemo-agent` pod | AgentMinder SDK (`uvicorn agentminder.sidecar:app`). Holds the agent and orchestrator client credentials, gets tokens, keeps the MCP session and forwards calls to the gateway. Listens on loopback only. |
-| AgentMinder token endpoint | AgentMinder | Issues OAuth tokens. Puts only policy-granted intents in the token's `scope`. |
+| AgentMinder token endpoint + agent profile API | AgentMinder | Issues OAuth tokens. Puts only policy-granted intents in the token's `scope`. The profile API tells the sidecar, called with the orchestrator token, which intents to ask for. |
 | AgentMinder AI gateway | AgentMinder | MCP proxy. Checks the token, filters `tools/list`, authorizes each `tools/call` against tool bindings and policy, forwards allowed calls. |
 | `mcp-server` | demo cluster, `agentminder-demo` | Plain FastMCP server with three tools. Does no auth of its own. |
 | LoadBalancer Service, or Gateway + HTTPRoute | demo cluster | Gives the MCP server an address the AgentMinder gateway can reach. |
